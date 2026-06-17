@@ -1,0 +1,11 @@
+# Never commit your token
+.env
+
+# Runtime data
+bot_data.json
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
