@@ -1,18 +1,8 @@
 """
 Telegram Group Admin Bot
-========================
-Features:
-  - Anti-spam / flood protection (auto-mute)
-  - Welcome messages (customizable per chat)
-  - Warn / kick / ban / unban system (auto-kick at warn threshold)
-  - Word filter (auto-delete + warn)
-  - Mute / unmute
-  - Rules system (/setrules, /rules)
-  - /addword / /removeword
-  - /help for admins
-
-Requirements: python-telegram-bot>=20.0, python-dotenv
-Run: python app.py
+Features: anti-spam/flood, welcome messages, warn/kick/ban/unban,
+word filter, mute/unmute, rules system.
+Requires: python-telegram-bot>=20.7, python-dotenv
 """
 
 import json
@@ -26,10 +16,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
-from telegram import (
-    ChatPermissions,
-    Update,
-)
+from telegram import ChatPermissions, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -39,26 +26,23 @@ from telegram.ext import (
     filters,
 )
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
-# CONFIGURATION â edit these before running
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
+# CONFIGURATION
+# ---------------------------------
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-# Flood settings: more than FLOOD_MAX_MESSAGES in FLOOD_WINDOW seconds â mute
 FLOOD_MAX_MESSAGES: int = 5
-FLOOD_WINDOW: int = 5          # seconds
+FLOOD_WINDOW: int = 5       # seconds
 FLOOD_MUTE_DURATION: int = 300  # seconds (5 min)
 
-# Number of warnings before a user is automatically kicked
 WARN_KICK_THRESHOLD: int = 3
 
-# Persistent data is saved here
 DATA_FILE = Path("bot_data.json")
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 # LOGGING
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -66,16 +50,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 # PERSISTENT DATA HELPERS
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 
 def _default_data() -> dict:
     return {
-        "warns": {},       # {chat_id: {user_id: count}}
-        "word_filters": {},  # {chat_id: [word, ...]}
-        "welcome": {},     # {chat_id: message_text}
-        "rules": {},       # {chat_id: rules_text}
+        "warns": {},
+        "word_filters": {},
+        "welcome": {},
+        "rules": {},
     }
 
 
@@ -94,12 +78,12 @@ def save_data(data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
-# In-memory flood tracker: {chat_id: {user_id: [timestamp, ...]}}
-flood_tracker: dict[int, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
+# In-memory flood tracker: {chat_id: {user_id: [timestamps]}}
+flood_tracker: dict = defaultdict(lambda: defaultdict(list))
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
-# PERMISSION HELPERS
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
+# PERMISSIONS
+# ---------------------------------
 
 MUTED = ChatPermissions(
     can_send_messages=False,
@@ -117,23 +101,20 @@ UNMUTED = ChatPermissions(
 
 
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Return True if the *sender* of the command is a chat admin."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     admins = await context.bot.get_chat_administrators(chat_id)
     return any(a.user.id == user_id for a in admins)
 
 
-async def require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Send an error reply if the sender is not an admin; return True if they are."""
+async def require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
-        await update.message.reply_text("â Admin only.")
+        await update.message.reply_text("Admin only.")
         return False
     return True
 
 
 def get_target_user(update: Update):
-    """Return (user_id, display_name) from a reply or first mention in command args."""
     msg = update.message
     if msg.reply_to_message:
         u = msg.reply_to_message.from_user
@@ -146,34 +127,29 @@ def get_target_user(update: Update):
     return None, None
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
-# ANTI-SPAM / FLOOD PROTECTION
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
+# FLOOD PROTECTION
+# ---------------------------------
 
-async def flood_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check message rate; mute users who exceed the limit."""
+async def flood_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_user:
         return
-
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     now = time.monotonic()
-
     admins = await context.bot.get_chat_administrators(chat_id)
     if any(a.user.id == user_id for a in admins):
         return
-
     tracker = flood_tracker[chat_id][user_id]
     tracker.append(now)
     flood_tracker[chat_id][user_id] = [t for t in tracker if now - t <= FLOOD_WINDOW]
-
     if len(flood_tracker[chat_id][user_id]) > FLOOD_MAX_MESSAGES:
         flood_tracker[chat_id][user_id] = []
         until = datetime.now(tz=timezone.utc) + timedelta(seconds=FLOOD_MUTE_DURATION)
         try:
             await context.bot.restrict_chat_member(chat_id, user_id, MUTED, until_date=until)
             await update.message.reply_text(
-                f"ð« {update.effective_user.mention_html()} has been muted for "
+                f"{update.effective_user.mention_html()} muted for "
                 f"{FLOOD_MUTE_DURATION // 60} min due to flooding.",
                 parse_mode=ParseMode.HTML,
             )
@@ -181,21 +157,18 @@ async def flood_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             logger.warning("Could not mute flooder: %s", e)
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
-# WORD FILTER
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
+# WORD FILTER CHECK
+# ---------------------------------
 
-async def word_filter_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Delete messages containing banned words and warn the sender."""
+async def word_filter_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
-
     data = load_data()
     chat_id = str(update.effective_chat.id)
     banned = data["word_filters"].get(chat_id, [])
     if not banned:
         return
-
     text_lower = update.message.text.lower()
     for word in banned:
         if word.lower() in text_lower:
@@ -208,21 +181,21 @@ async def word_filter_check(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 chat_id,
                 str(update.effective_user.id),
                 update.effective_user.full_name,
-                reason=f'banned word "{word}"',
+                reason=f"banned word: {word}",
             )
             return
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 # WELCOME MESSAGES
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 
-async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
     chat_id = str(update.effective_chat.id)
     template = data["welcome"].get(
         chat_id,
-        "ð Welcome to {chat_title}, {name}! Please read the /rules.",
+        "Welcome to {chat_title}, {name}! Please read the /rules.",
     )
     for member in update.message.new_chat_members:
         text = template.format(
@@ -233,9 +206,9 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 # WARN SYSTEM
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 
 async def _apply_warn(
     update: Update,
@@ -244,14 +217,12 @@ async def _apply_warn(
     chat_id: str,
     user_id: str,
     display_name: str,
-    reason: str = "no reason given",
-) -> None:
-    """Increment warn count and kick if threshold reached."""
+    reason: str = "no reason",
+):
     data["warns"].setdefault(chat_id, {})
     data["warns"][chat_id][user_id] = data["warns"][chat_id].get(user_id, 0) + 1
     count = data["warns"][chat_id][user_id]
     save_data(data)
-
     if count >= WARN_KICK_THRESHOLD:
         data["warns"][chat_id][user_id] = 0
         save_data(data)
@@ -261,19 +232,17 @@ async def _apply_warn(
         except Exception as e:
             logger.warning("Could not kick warned user: %s", e)
         await update.effective_chat.send_message(
-            f"â ï¸ <b>{display_name}</b> reached {WARN_KICK_THRESHOLD} warnings and has been kicked.\n"
-            f"Reason: {reason}",
+            f"<b>{display_name}</b> reached {WARN_KICK_THRESHOLD} warnings and has been kicked. Reason: {reason}",
             parse_mode=ParseMode.HTML,
         )
     else:
         await update.effective_chat.send_message(
-            f"â ï¸ Warning {count}/{WARN_KICK_THRESHOLD} for <b>{display_name}</b>.\n"
-            f"Reason: {reason}",
+            f"Warning {count}/{WARN_KICK_THRESHOLD} for <b>{display_name}</b>. Reason: {reason}",
             parse_mode=ParseMode.HTML,
         )
 
 
-async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     user_id, display_name = get_target_user(update)
@@ -281,7 +250,7 @@ async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Reply to a message or pass a user ID.")
         return
     reason_parts = update.message.text.split()[2:]
-    reason = " ".join(reason_parts) if reason_parts else "no reason given"
+    reason = " ".join(reason_parts) if reason_parts else "no reason"
     data = load_data()
     await _apply_warn(
         update, context, data,
@@ -290,7 +259,7 @@ async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def cmd_unwarn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_unwarn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     user_id, display_name = get_target_user(update)
@@ -306,13 +275,12 @@ async def cmd_unwarn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     data["warns"][chat_id][str(user_id)] = current - 1
     save_data(data)
     await update.message.reply_text(
-        f"â Removed one warning from <b>{display_name}</b>. "
-        f"Now at {current - 1}/{WARN_KICK_THRESHOLD}.",
+        f"Removed one warning from <b>{display_name}</b>. Now at {current - 1}/{WARN_KICK_THRESHOLD}.",
         parse_mode=ParseMode.HTML,
     )
 
 
-async def cmd_warns(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_warns(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     data = load_data()
@@ -322,18 +290,18 @@ async def cmd_warns(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not active:
         await update.message.reply_text("No active warnings in this chat.")
         return
-    lines = [f"â¢ <code>{uid}</code>: {cnt}/{WARN_KICK_THRESHOLD}" for uid, cnt in active.items()]
+    lines = [f"<code>{uid}</code>: {cnt}/{WARN_KICK_THRESHOLD}" for uid, cnt in active.items()]
     await update.message.reply_text(
-        "â ï¸ <b>Active warnings:</b>\n" + "\n".join(lines),
+        "Active warnings:\n" + "\n".join(lines),
         parse_mode=ParseMode.HTML,
     )
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 # KICK / BAN / UNBAN
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 
-async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     user_id, display_name = get_target_user(update)
@@ -344,12 +312,12 @@ async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await context.bot.ban_chat_member(chat_id, user_id)
         await context.bot.unban_chat_member(chat_id, user_id)
-        await update.message.reply_text(f"ð¢ <b>{display_name}</b> has been kicked.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(f"<b>{display_name}</b> has been kicked.", parse_mode=ParseMode.HTML)
     except Exception as e:
-        await update.message.reply_text(f"â Could not kick: {e}")
+        await update.message.reply_text(f"Could not kick: {e}")
 
 
-async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     user_id, display_name = get_target_user(update)
@@ -357,19 +325,19 @@ async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Reply to a message or pass a user ID.")
         return
     reason_parts = update.message.text.split()[2:]
-    reason = " ".join(reason_parts) if reason_parts else "no reason given"
+    reason = " ".join(reason_parts) if reason_parts else "no reason"
     chat_id = update.effective_chat.id
     try:
         await context.bot.ban_chat_member(chat_id, user_id)
         await update.message.reply_text(
-            f"ð¨ <b>{display_name}</b> has been banned.\nReason: {reason}",
+            f"<b>{display_name}</b> has been banned. Reason: {reason}",
             parse_mode=ParseMode.HTML,
         )
     except Exception as e:
-        await update.message.reply_text(f"â Could not ban: {e}")
+        await update.message.reply_text(f"Could not ban: {e}")
 
 
-async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     args = update.message.text.split()[1:]
@@ -380,16 +348,16 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     try:
         await context.bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
-        await update.message.reply_text(f"â User <code>{user_id}</code> has been unbanned.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(f"User <code>{user_id}</code> unbanned.", parse_mode=ParseMode.HTML)
     except Exception as e:
-        await update.message.reply_text(f"â Could not unban: {e}")
+        await update.message.reply_text(f"Could not unban: {e}")
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 # MUTE / UNMUTE
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 
-async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     user_id, display_name = get_target_user(update)
@@ -402,24 +370,19 @@ async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if arg.isdigit():
             duration_min = int(arg)
             break
-
     chat_id = update.effective_chat.id
     until = None
     if duration_min:
         until = datetime.now(tz=timezone.utc) + timedelta(minutes=duration_min)
-
     try:
         await context.bot.restrict_chat_member(chat_id, user_id, MUTED, until_date=until)
         suffix = f"for {duration_min} min" if duration_min else "indefinitely"
-        await update.message.reply_text(
-            f"ð <b>{display_name}</b> has been muted {suffix}.",
-            parse_mode=ParseMode.HTML,
-        )
+        await update.message.reply_text(f"<b>{display_name}</b> muted {suffix}.", parse_mode=ParseMode.HTML)
     except Exception as e:
-        await update.message.reply_text(f"â Could not mute: {e}")
+        await update.message.reply_text(f"Could not mute: {e}")
 
 
-async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     user_id, display_name = get_target_user(update)
@@ -429,19 +392,16 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     chat_id = update.effective_chat.id
     try:
         await context.bot.restrict_chat_member(chat_id, user_id, UNMUTED)
-        await update.message.reply_text(
-            f"ð <b>{display_name}</b> has been unmuted.",
-            parse_mode=ParseMode.HTML,
-        )
+        await update.message.reply_text(f"<b>{display_name}</b> unmuted.", parse_mode=ParseMode.HTML)
     except Exception as e:
-        await update.message.reply_text(f"â Could not unmute: {e}")
+        await update.message.reply_text(f"Could not unmute: {e}")
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 # WORD FILTER MANAGEMENT
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 
-async def cmd_addword(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_addword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     args = update.message.text.split()[1:]
@@ -453,14 +413,14 @@ async def cmd_addword(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = str(update.effective_chat.id)
     data["word_filters"].setdefault(chat_id, [])
     if word in data["word_filters"][chat_id]:
-        await update.message.reply_text(f'"{·ord}" is already in the filter.')
+        await update.message.reply_text(f'"{word}" is already in the filter.')
         return
     data["word_filters"][chat_id].append(word)
     save_data(data)
-    await update.message.reply_text(f'â Added "{word}" to the word filter.')
+    await update.message.reply_text(f'Added "{word}" to the word filter.')
 
 
-async def cmd_removeword(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_removeword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     args = update.message.text.split()[1:]
@@ -472,14 +432,14 @@ async def cmd_removeword(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = str(update.effective_chat.id)
     words = data["word_filters"].get(chat_id, [])
     if word not in words:
-        await update.message.reply_text(f'"{lower(word)}" is not in the filter.')
+        await update.message.reply_text(f'"{word}" is not in the filter.')
         return
     words.remove(word)
     save_data(data)
-    await update.message.reply_text(f'â Removed "{word}" from the word filter.')
+    await update.message.reply_text(f'Removed "{word}" from the word filter.')
 
 
-async def cmd_listwords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_listwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     data = load_data()
@@ -489,16 +449,16 @@ async def cmd_listwords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("No banned words in this chat.")
         return
     await update.message.reply_text(
-        "ð« Banned words: " + ", ".join(f'<code>{w}</code>' for w in words),
+        "Banned words: " + ", ".join(f"<code>{w}</code>" for w in words),
         parse_mode=ParseMode.HTML,
     )
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 # WELCOME MESSAGE CUSTOMIZATION
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 
-async def cmd_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     parts = update.message.text.split(maxsplit=1)
@@ -510,25 +470,25 @@ async def cmd_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     data = load_data()
     data["welcome"][str(update.effective_chat.id)] = parts[1]
     save_data(data)
-    await update.message.reply_text("â Welcome message updated.")
+    await update.message.reply_text("Welcome message updated.")
 
 
-async def cmd_getwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_getwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     data = load_data()
     msg = data["welcome"].get(
         str(update.effective_chat.id),
-        "ð Welcome to {chat_title}, {name}! Please read the /rules.",
+        "Welcome to {chat_title}, {name}! Please read the /rules.",
     )
     await update.message.reply_text(f"Current welcome message:\n\n{msg}")
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 # RULES
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 
-async def cmd_setrules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_setrules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     parts = update.message.text.split(maxsplit=1)
@@ -538,77 +498,70 @@ async def cmd_setrules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     data = load_data()
     data["rules"][str(update.effective_chat.id)] = parts[1]
     save_data(data)
-    await update.message.reply_text("â Rules updated.")
+    await update.message.reply_text("Rules updated.")
 
 
-async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
     rules = data["rules"].get(str(update.effective_chat.id))
     if not rules:
-        await update.message.reply_text("No rules have been set yet. Admins can use /setrules.")
+        await update.message.reply_text("No rules set yet. Use /setrules.")
         return
-    await update.message.reply_text(f"ð <b>Group Rules:</b>\n\n{rules}", parse_mode=ParseMode.HTML)
+    await update.message.reply_text(f"<b>Group Rules:</b>\n\n{rules}", parse_mode=ParseMode.HTML)
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 # HELP
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 
-# Note: {{name}} etc. are escaped so .format() doesn't consume them
 HELP_TEXT = (
-    "<b>ð¤ Admin Bot Commands</b>\n\n"
-    "<b>Moderation (admin only):</b>\n"
-    "/warn [reason] â warn a user (reply to their message)\n"
-    "/unwarn â remove one warning (reply)\n"
-    "/warns â list all active warnings\n"
-    "/kick â kick a user (reply)\n"
-    "/ban [reason] â permanently ban a user (reply)\n"
-    "/unban &lt;user_id&gt; â unban a user\n"
-    "/mute [minutes] â a user (reply)\n"
-    "/unmute â unmute a user (reply)\n\n"
-    "<b>Word Filter (admin only):</b>\n"
-    "/addword &lt;word&gt; â add banned word\n"
-    "/removeword &lt;word&gt; â remove banned word\n"
-    "/listwords â show all banned words\n\n"
-    "<b>Welcome (admin only):</b>\n"
-    "/setwelcome &lt;text&gt; â set welcome message\n"
-    "/getwelcome â see current welcome message\n"
-    "Placeholders: {{name}} {{username}} {{chat_title}}\n\n"
+    "<b>Admin Bot Commands</b>\n\n"
+    "<b>Moderation (admin):</b>\n"
+    "/warn [reason] - warn a user (reply)\n"
+    "/unwarn - remove one warning (reply)\n"
+    "/warns - list active warnings\n"
+    "/kick - kick a user (reply)\n"
+    "/ban [reason] - ban a user (reply)\n"
+    "/unban <user_id> - unban a user\n"
+    "/mute [minutes] - mute a user (reply)\n"
+    "/unmute - unmute a user (reply)\n\n"
+    "<b>Word Filter (admin):</b>\n"
+    "/addword <word> - add banned word\n"
+    "/removeword <word> - remove banned word\n"
+    "/listwords - show banned words\n\n"
+    "<b>Welcome (admin):</b>\n"
+    "/setwelcome <text> - set welcome message\n"
+    "/getwelcome - see current welcome\n"
+    "Placeholders: {name} {username} {chat_title}\n\n"
     "<b>Rules:</b>\n"
-    "/setrules &lt;text&gt; â set group rules (admin only)\n"
-    "/rules â display group rules\n\n"
+    "/setrules <text> - set group rules (admin)\n"
+    "/rules - display group rules\n\n"
     "<b>Auto-moderation:</b>\n"
-    "â¢ Flood protection: &gt;{flood_max} messages in {flood_win}s â {mute_min}-min mute\n"
-    "â¢ Warns: {warn_thresh} warnings â auto-kick\n"
-    "â¢ Word filter: banned words â delete + warn\n"
-).format(
-    flood_max=FLOOD_MAX_MESSAGES,
-    flood_win=FLOOD_WINDOW,
-    mute_min=FLOOD_MUTE_DURATION // 60,
-    warn_thresh=WARN_KICK_THRESHOLD,
+    f"Flood: >{FLOOD_MAX_MESSAGES} msgs in {FLOOD_WINDOW}s -> {FLOOD_MUTE_DURATION // 60}min mute\n"
+    f"Warns: {WARN_KICK_THRESHOLD} warnings -> auto-kick\n"
+    "Word filter: banned words -> delete + warn\n"
 )
 
 
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML)
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
-# MESSAGE HANDLER (combines flood + word filter)
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
+# MESSAGE HANDLER
+# ---------------------------------
 
-async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await flood_check(update, context)
     await word_filter_check(update, context)
 
 
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 # MAIN
-# ââââââââââââââââââââââââââââââââââââââââââââââ
+# ---------------------------------
 
-def main() -> None:
+def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("warn", cmd_warn))
     app.add_handler(CommandHandler("unwarn", cmd_unwarn))
     app.add_handler(CommandHandler("warns", cmd_warns))
@@ -626,13 +579,8 @@ def main() -> None:
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("start", cmd_help))
-    app.add_handler(
-        MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member)
-    )
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, on_message)
-    )
-
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, on_message))
     logger.info("Bot started.")
     app.run_polling(drop_pending_updates=True)
 
