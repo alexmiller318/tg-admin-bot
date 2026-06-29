@@ -58,6 +58,7 @@ def _default_data() -> dict:
     return {
         "warns": {},
         "word_filters": {},
+        "banned_name_words": {},
         "welcome": {},
         "rules": {},
     }
@@ -187,17 +188,137 @@ async def word_filter_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------
+# USERNAME / DISPLAY NAME FILTER
+# ---------------------------------
+
+def _banned_name_match(name: str, banned_words: list) -> str | None:
+    """Return the first matching banned word found in name, or None."""
+    name_lower = name.lower()
+    for word in banned_words:
+        if word.lower() in name_lower:
+            return word
+    return None
+
+
+async def username_filter_check(
+    chat_id_int: int,
+    user,
+    context: ContextTypes.DEFAULT_TYPE,
+    notify_chat_id: int | None = None,
+) -> bool:
+    """
+    Check user's display name and @username against the banned name words list.
+    If matched, kick the user and send a notification.
+    Returns True if the user was kicked.
+    """
+    data = load_data()
+    chat_id = str(chat_id_int)
+    banned = data.get("banned_name_words", {}).get(chat_id, [])
+    if not banned:
+        return False
+
+    full_name = user.full_name or ""
+    username = user.username or ""
+
+    matched = _banned_name_match(full_name, banned) or _banned_name_match(username, banned)
+    if not matched:
+        return False
+
+    try:
+        await context.bot.ban_chat_member(chat_id_int, user.id)
+        await context.bot.unban_chat_member(chat_id_int, user.id)
+    except Exception as e:
+        logger.warning("Could not kick user with banned name: %s", e)
+
+    note_chat = notify_chat_id or chat_id_int
+    try:
+        await context.bot.send_message(
+            note_chat,
+            f"Kicked <b>{user.full_name}</b> "
+            f"(<code>{user.id}</code>) - name contains banned word: <code>{matched}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.warning("Could not send username-kick notice: %s", e)
+
+    return True
+
+
+# ---------------------------------
+# USERNAME FILTER MANAGEMENT
+# ---------------------------------
+
+async def cmd_adduserword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update, context):
+        return
+    args = update.message.text.split()[1:]
+    if not args:
+        await update.message.reply_text("Usage: /adduserword <word>")
+        return
+    word = args[0].lower()
+    data = load_data()
+    chat_id = str(update.effective_chat.id)
+    data.setdefault("banned_name_words", {})
+    data["banned_name_words"].setdefault(chat_id, [])
+    if word in data["banned_name_words"][chat_id]:
+        await update.message.reply_text(f'"{word}" is already in the username filter.')
+        return
+    data["banned_name_words"][chat_id].append(word)
+    save_data(data)
+    await update.message.reply_text(f'Added "{word}" to the username filter.')
+
+
+async def cmd_removeuserword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update, context):
+        return
+    args = update.message.text.split()[1:]
+    if not args:
+        await update.message.reply_text("Usage: /removeuserword <word>")
+        return
+    word = args[0].lower()
+    data = load_data()
+    chat_id = str(update.effective_chat.id)
+    words = data.get("banned_name_words", {}).get(chat_id, [])
+    if word not in words:
+        await update.message.reply_text(f'"{word}" is not in the username filter.')
+        return
+    words.remove(word)
+    save_data(data)
+    await update.message.reply_text(f'Removed "{word}" from the username filter.')
+
+
+async def cmd_listuserwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update, context):
+        return
+    data = load_data()
+    chat_id = str(update.effective_chat.id)
+    words = data.get("banned_name_words", {}).get(chat_id, [])
+    if not words:
+        await update.message.reply_text("No banned username words in this chat.")
+        return
+    await update.message.reply_text(
+        "Banned username words: " + ", ".join(f"<code>{w}</code>" for w in words),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# ---------------------------------
 # WELCOME MESSAGES
 # ---------------------------------
 
 async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
     chat_id = str(update.effective_chat.id)
+    chat_id_int = update.effective_chat.id
     template = data["welcome"].get(
         chat_id,
         "Welcome to {chat_title}, {name}! Please read the /rules.",
     )
     for member in update.message.new_chat_members:
+        # Kick immediately if their name/username is banned
+        kicked = await username_filter_check(chat_id_int, member, context, notify_chat_id=chat_id_int)
+        if kicked:
+            continue
         text = template.format(
             name=member.mention_html(),
             chat_title=update.effective_chat.title or "the group",
@@ -328,7 +449,7 @@ async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reason = " ".join(reason_parts) if reason_parts else "no reason"
     chat_id = update.effective_chat.id
     try:
-        await context.bot.ban_chat_member(chat_id, user_id)
+        await context.bot.ban_chat]ember(chat_id, user_id)
         await update.message.reply_text(
             f"<b>{display_name}</b> has been banned. Reason: {reason}",
             parse_mode=ParseMode.HTML,
@@ -526,9 +647,13 @@ HELP_TEXT = (
     "/mute [minutes] - mute a user (reply)\n"
     "/unmute - unmute a user (reply)\n\n"
     "<b>Word Filter (admin):</b>\n"
-    "/addword [word] - add banned word\n"
+    "/addword [word] - add banned word (messages)\n"
     "/removeword [word] - remove banned word\n"
     "/listwords - show banned words\n\n"
+    "<b>Username Filter (admin):</b>\n"
+    "/adduserword [word] - ban users whose name contains word\n"
+    "/removeuserword [word] - remove from username filter\n"
+    "/listuserwords - show username filter list\n\n"
     "<b>Welcome (admin):</b>\n"
     "/setwelcome [text] - set welcome message\n"
     "/getwelcome - see current welcome\n"
@@ -552,6 +677,19 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user:
+        kicked = await username_filter_check(
+            update.effective_chat.id,
+            update.effective_user,
+            context,
+            notify_chat_id=update.effective_chat.id,
+        )
+        if kicked:
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
     await flood_check(update, context)
     await word_filter_check(update, context)
 
@@ -573,6 +711,9 @@ def main():
     app.add_handler(CommandHandler("addword", cmd_addword))
     app.add_handler(CommandHandler("removeword", cmd_removeword))
     app.add_handler(CommandHandler("listwords", cmd_listwords))
+    app.add_handler(CommandHandler("adduserword", cmd_adduserword))
+    app.add_handler(CommandHandler("removeuserword", cmd_removeuserword))
+    app.add_handler(CommandHandler("listuserwords", cmd_listuserwords))
     app.add_handler(CommandHandler("setwelcome", cmd_setwelcome))
     app.add_handler(CommandHandler("getwelcome", cmd_getwelcome))
     app.add_handler(CommandHandler("setrules", cmd_setrules))
