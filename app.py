@@ -47,7 +47,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 # Flood settings: more than FLOOD_MAX_MESSAGES in FLOOD_WINDOW seconds â mute
 FLOOD_MAX_MESSAGES: int = 5
-FLOOD_WINDOW: int = 5           # seconds
+FLOOD_WINDOW: int = 5          # seconds
 FLOOD_MUTE_DURATION: int = 300  # seconds (5 min)
 
 # Number of warnings before a user is automatically kicked
@@ -67,7 +67,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ââââââââââââââââââââââââââââââââââââââââââââââ
-# PERSISTENT DATA AELPEPS
+# PERSISTENT DATA HELPERS
 # ââââââââââââââââââââââââââââââââââââââââââââââ
 
 def _default_data() -> dict:
@@ -208,7 +208,7 @@ async def word_filter_check(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 chat_id,
                 str(update.effective_user.id),
                 update.effective_user.full_name,
-                reason=f'banned word "{lword}"',
+                reason=f'banned word "{word}"',
             )
             return
 
