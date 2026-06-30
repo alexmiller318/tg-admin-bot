@@ -449,7 +449,7 @@ async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reason = " ".join(reason_parts) if reason_parts else "no reason"
     chat_id = update.effective_chat.id
     try:
-        await context.bot.ban_chat]ember(chat_id, user_id)
+        await context.bot.ban_chat_member(chat_id, user_id)
         await update.message.reply_text(
             f"<b>{display_name}</b> has been banned. Reason: {reason}",
             parse_mode=ParseMode.HTML,
